@@ -1,33 +1,47 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'data/datasources/local_study_data_source.dart';
 import 'data/datasources/remote_study_data_source.dart';
 import 'data/datasources/sqlite_local_study_data_source.dart';
+import 'data/datasources/user_preferences_data_source.dart';
 import 'data/repositories/offline_first_study_session_repository.dart';
 import 'domain/repositories/motivation_repository.dart';
 import 'domain/repositories/study_session_repository.dart';
 import 'presentation/notifiers/active_timer_notifier.dart';
 import 'presentation/notifiers/study_diary_notifier.dart';
+import 'presentation/notifiers/user_preferences_notifier.dart';
 import 'presentation/screens/main_shell_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  final UserPreferencesDataSource preferencesDataSource =
+      SharedPreferencesUserPreferencesDataSource();
   final StudySessionRepository repository = OfflineFirstStudySessionRepository(
     localDataSource: SqliteLocalStudyDataSource(),
     remoteDataSource: const OfflineRemoteStudyDataSource(),
+    preferencesDataSource: preferencesDataSource,
   );
-  runApp(StudyDiaryApp(repository: repository));
+  runApp(
+    StudyDiaryApp(
+      repository: repository,
+      preferencesDataSource: preferencesDataSource,
+    ),
+  );
 }
 
 class StudyDiaryApp extends StatefulWidget {
   final StudySessionRepository? repository;
   final MotivationRepository? motivationRepository;
+  final UserPreferencesDataSource? preferencesDataSource;
 
   const StudyDiaryApp({
     super.key,
     this.repository,
     this.motivationRepository,
+    this.preferencesDataSource,
   });
 
   @override
@@ -35,22 +49,33 @@ class StudyDiaryApp extends StatefulWidget {
 }
 
 class _StudyDiaryAppState extends State<StudyDiaryApp> {
+  late UserPreferencesDataSource _resolvedPreferencesDataSource;
   late StudySessionRepository _resolvedRepository;
   late ActiveTimerNotifier _timerNotifier;
   late StudyDiaryNotifier _diaryNotifier;
+  late UserPreferencesNotifier _preferencesNotifier;
 
   void _initNotifiers() {
+    _resolvedPreferencesDataSource =
+        widget.preferencesDataSource ?? InMemoryUserPreferencesDataSource();
     _resolvedRepository =
         widget.repository ??
         OfflineFirstStudySessionRepository(
           localDataSource: InMemoryLocalStudyDataSource(),
           remoteDataSource: const OfflineRemoteStudyDataSource(),
+          preferencesDataSource: _resolvedPreferencesDataSource,
         );
-    _timerNotifier = ActiveTimerNotifier();
+    _timerNotifier = ActiveTimerNotifier(
+      preferencesDataSource: _resolvedPreferencesDataSource,
+    );
     _diaryNotifier = StudyDiaryNotifier(
       repository: _resolvedRepository,
       motivationRepository: widget.motivationRepository,
     );
+    _preferencesNotifier = UserPreferencesNotifier(
+      dataSource: _resolvedPreferencesDataSource,
+    );
+    unawaited(_preferencesNotifier.loadPreferences());
   }
 
   @override
@@ -63,9 +88,11 @@ class _StudyDiaryAppState extends State<StudyDiaryApp> {
   void didUpdateWidget(covariant StudyDiaryApp oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.repository != widget.repository ||
-        oldWidget.motivationRepository != widget.motivationRepository) {
+        oldWidget.motivationRepository != widget.motivationRepository ||
+        oldWidget.preferencesDataSource != widget.preferencesDataSource) {
       _timerNotifier.dispose();
       _diaryNotifier.dispose();
+      _preferencesNotifier.dispose();
       _initNotifiers();
     }
   }
@@ -74,6 +101,7 @@ class _StudyDiaryAppState extends State<StudyDiaryApp> {
   void dispose() {
     _timerNotifier.dispose();
     _diaryNotifier.dispose();
+    _preferencesNotifier.dispose();
     super.dispose();
   }
 
@@ -86,6 +114,9 @@ class _StudyDiaryAppState extends State<StudyDiaryApp> {
         ),
         ChangeNotifierProvider<StudyDiaryNotifier>.value(
           value: _diaryNotifier,
+        ),
+        ChangeNotifierProvider<UserPreferencesNotifier>.value(
+          value: _preferencesNotifier,
         ),
       ],
       child: MaterialApp(
@@ -108,5 +139,6 @@ class MyApp extends StudyDiaryApp {
     super.key,
     super.repository,
     super.motivationRepository,
+    super.preferencesDataSource,
   });
 }

@@ -4,17 +4,26 @@ import '../../domain/entities/sync_result.dart';
 import '../../domain/repositories/study_session_repository.dart';
 import '../datasources/local_study_data_source.dart';
 import '../datasources/remote_study_data_source.dart';
+import '../datasources/user_preferences_data_source.dart';
 import '../models/study_session_model.dart';
 import '../models/study_subject_model.dart';
 
 class OfflineFirstStudySessionRepository implements StudySessionRepository {
   final LocalStudyDataSource localDataSource;
   final RemoteStudyDataSource remoteDataSource;
+  final UserPreferencesDataSource preferencesDataSource;
+  final DateTime Function() _clock;
 
   OfflineFirstStudySessionRepository({
     required this.localDataSource,
     RemoteStudyDataSource? remoteDataSource,
-  }) : remoteDataSource = remoteDataSource ?? const OfflineRemoteStudyDataSource();
+    UserPreferencesDataSource? preferencesDataSource,
+    DateTime Function()? clock,
+  }) : remoteDataSource =
+           remoteDataSource ?? const OfflineRemoteStudyDataSource(),
+       preferencesDataSource =
+           preferencesDataSource ?? InMemoryUserPreferencesDataSource(),
+       _clock = clock ?? DateTime.now;
 
   static bool _needsSync(String s) =>
       s == SyncStatus.pendingSync.name || s == SyncStatus.syncFailed.name;
@@ -159,8 +168,12 @@ class OfflineFirstStudySessionRepository implements StudySessionRepository {
         }
       }
 
+      final DateTime syncStartedAt = _clock().toUtc();
+      final DateTime? lastSyncedAt =
+          await preferencesDataSource.getLastSyncedAt();
+
       final List<StudySubjectModel> remoteSubjects =
-          await remoteDataSource.pullSubjects();
+          await remoteDataSource.pullSubjects(since: lastSyncedAt);
       if (remoteSubjects.isNotEmpty) {
         final Map<String, StudySubjectModel> local = await _subjectMap();
         final List<StudySubjectModel> merged = <StudySubjectModel>[];
@@ -178,7 +191,7 @@ class OfflineFirstStudySessionRepository implements StudySessionRepository {
       }
 
       final List<StudySessionModel> remoteSessions =
-          await remoteDataSource.pullSessions();
+          await remoteDataSource.pullSessions(since: lastSyncedAt);
       if (remoteSessions.isNotEmpty) {
         final Map<String, StudySessionModel> local = await _sessionMap();
         final List<StudySessionModel> merged = <StudySessionModel>[];
@@ -202,6 +215,8 @@ class OfflineFirstStudySessionRepository implements StudySessionRepository {
         }
         if (merged.isNotEmpty) await localDataSource.upsertSessionModels(merged);
       }
+
+      await preferencesDataSource.setLastSyncedAt(syncStartedAt);
 
       return SyncResult(
         pushedCount: pushed,

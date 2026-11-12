@@ -116,3 +116,14 @@ enum CompanionMood {
   finalSetCheer,
   proudCelebration,
 }
+
+enum TimerVisualStyle {
+  digital('Digital Timer'),
+  circularRing('Circular Ring Timer');
+
+  final String displayLabel;
+  const TimerVisualStyle(this.displayLabel);
+
+  static TimerVisualStyle fromStorageString(String value) =>
+      _parseEnum(TimerVisualStyle.values, value, 'TimerVisualStyle');
+}

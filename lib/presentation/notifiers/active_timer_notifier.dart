@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../data/datasources/user_preferences_data_source.dart';
 import '../../domain/entities/study_enums.dart';
+import '../../domain/entities/user_preferences.dart';
 
 enum StudyFlowPhase {
   idle,
@@ -16,6 +18,7 @@ class ActiveTimerNotifier extends ChangeNotifier {
   static const int pomodoroBreakSeconds = 5 * 60;
   static const int oneHourStudySeconds = 60 * 60;
 
+  final UserPreferencesDataSource? preferencesDataSource;
   final DateTime Function() _clock;
   final Timer Function(Duration, void Function(Timer)) _timerFactory;
 
@@ -39,12 +42,17 @@ class ActiveTimerNotifier extends ChangeNotifier {
   bool _isDisposed = false;
 
   ActiveTimerNotifier({
+    this.preferencesDataSource,
     DateTime Function()? clock,
     Timer Function(Duration duration, void Function(Timer) callback)?
         timerFactory,
   }) : _clock = clock ?? DateTime.now,
        _timerFactory = timerFactory ??
-           ((Duration d, void Function(Timer) cb) => Timer.periodic(d, cb));
+           ((Duration d, void Function(Timer) cb) => Timer.periodic(d, cb)) {
+    if (preferencesDataSource != null) {
+      unawaited(loadSavedPreferences());
+    }
+  }
 
   SessionType get selectedSessionType => _selectedSessionType;
   int get targetPomodoroSets => _targetPomodoroSets;
@@ -157,12 +165,45 @@ class ActiveTimerNotifier extends ChangeNotifier {
     };
     _errorMessage = null;
     _safeNotify();
+    unawaited(_persistTimerPreferences());
   }
 
   void setTargetPomodoroSets(int sets) {
     if (_phase != StudyFlowPhase.idle) return;
     _targetPomodoroSets = sets.clamp(1, 8);
     _safeNotify();
+    unawaited(_persistTimerPreferences());
+  }
+
+  Future<void> loadSavedPreferences() async {
+    final UserPreferencesDataSource? ds = preferencesDataSource;
+    if (ds == null) return;
+    try {
+      final UserPreferences prefs = await ds.getPreferences();
+      if (_isDisposed || _phase != StudyFlowPhase.idle) return;
+      _selectedSessionType = prefs.defaultSessionType;
+      _targetPomodoroSets = prefs.defaultPomodoroSets.clamp(1, 8);
+      _currentPhaseRemainingSeconds = switch (_selectedSessionType) {
+        SessionType.pomodoro => pomodoroStudySeconds,
+        SessionType.oneHour => oneHourStudySeconds,
+        SessionType.freeStudy => 0,
+      };
+      _safeNotify();
+    } catch (_) {}
+  }
+
+  Future<void> _persistTimerPreferences() async {
+    final UserPreferencesDataSource? ds = preferencesDataSource;
+    if (ds == null) return;
+    try {
+      final UserPreferences current = await ds.getPreferences();
+      await ds.savePreferences(
+        current.copyWith(
+          defaultSessionType: _selectedSessionType,
+          defaultPomodoroSets: _targetPomodoroSets,
+        ),
+      );
+    } catch (_) {}
   }
 
   bool startSession({SessionType? sessionType, int? targetPomodoroSets}) {

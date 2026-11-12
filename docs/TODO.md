@@ -5,7 +5,7 @@
 ---
 
 ## 1. Tech Stack Completion (Current Priority)
-- [ ] **SharedPreferences Integration:** Persist `lastSyncedAt` timestamp, user preferences (timer style, theme/focus settings).
+- [x] **SharedPreferences Integration:** Persist `lastSyncedAt` timestamp, user preferences (timer style, theme/focus settings).
 - [ ] **Firebase Core & Authentication:** Optional user sign-in (Google / Email) so users can back up and restore their study history across devices or reinstalls.
 - [ ] **Firebase Cloud Firestore (Cost-Safe Delta Sync):** Connect `RemoteStudyDataSource` to Firestore so only `pendingSync` / `pendingDelete` rows are pushed and only records newer than `lastSyncedAt` are pulled.
 - [ ] **Firebase Crashlytics:** Real-time production crash and error reporting.

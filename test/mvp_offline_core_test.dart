@@ -4,10 +4,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:study_diary_app/data/datasources/local_study_data_source.dart';
 import 'package:study_diary_app/data/datasources/remote_study_data_source.dart';
 import 'package:study_diary_app/data/datasources/sqlite_local_study_data_source.dart';
+import 'package:study_diary_app/data/datasources/user_preferences_data_source.dart';
 import 'package:study_diary_app/data/models/study_subject_model.dart';
 import 'package:study_diary_app/data/repositories/in_memory_study_session_repository.dart';
 import 'package:study_diary_app/data/repositories/local_motivation_repository.dart';
@@ -16,15 +18,19 @@ import 'package:study_diary_app/domain/entities/motivational_prompt.dart';
 import 'package:study_diary_app/domain/entities/study_session.dart';
 import 'package:study_diary_app/domain/entities/study_subject.dart';
 import 'package:study_diary_app/domain/entities/sync_result.dart';
+import 'package:study_diary_app/domain/entities/user_preferences.dart';
 import 'package:study_diary_app/main.dart';
 import 'package:study_diary_app/presentation/notifiers/active_timer_notifier.dart';
 import 'package:study_diary_app/presentation/notifiers/study_diary_notifier.dart';
+import 'package:study_diary_app/presentation/notifiers/user_preferences_notifier.dart';
 
 class _ControllableRemote implements RemoteStudyDataSource {
   bool online = true;
   bool failPushSessions = false;
   bool failPullSessions = false;
   Completer<void>? pushGate;
+  DateTime? lastPullSessionsSince;
+  DateTime? lastPullSubjectsSince;
   final Map<String, StudySessionModel> remoteSessions = <String, StudySessionModel>{};
   final Map<String, StudySubjectModel> remoteSubjects = <String, StudySubjectModel>{};
   final List<String> deletedIds = <String>[];
@@ -51,6 +57,7 @@ class _ControllableRemote implements RemoteStudyDataSource {
 
   @override
   Future<List<StudySessionModel>> pullSessions({DateTime? since}) async {
+    lastPullSessionsSince = since;
     if (failPullSessions) throw Exception('pullSessions network error');
     return remoteSessions.values.toList(growable: false);
   }
@@ -63,8 +70,10 @@ class _ControllableRemote implements RemoteStudyDataSource {
   }
 
   @override
-  Future<List<StudySubjectModel>> pullSubjects({DateTime? since}) async =>
-      remoteSubjects.values.toList(growable: false);
+  Future<List<StudySubjectModel>> pullSubjects({DateTime? since}) async {
+    lastPullSubjectsSince = since;
+    return remoteSubjects.values.toList(growable: false);
+  }
 }
 
 class _FakeTimer implements Timer {
@@ -397,6 +406,72 @@ void main() {
       expect(kept.notes, 'Edited locally');
       expect(kept.syncStatus, SyncStatus.pendingSync);
     });
+
+    test('SharedPreferencesUserPreferencesDataSource & OfflineFirstStudySessionRepository delta-sync (lastSyncedAt)', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'pref_default_session_type': 'bad_enum',
+        'pref_default_pomodoro_sets': 99,
+        'pref_timer_visual_style': 'bad_style',
+        'pref_last_synced_at': 'not_a_date',
+      });
+      final SharedPreferencesUserPreferencesDataSource prefsDs =
+          SharedPreferencesUserPreferencesDataSource();
+
+      // Gracefully falls back on corrupted/out-of-range values
+      final UserPreferences fallbackPrefs = await prefsDs.getPreferences();
+      expect(fallbackPrefs.defaultSessionType, SessionType.pomodoro);
+      expect(fallbackPrefs.defaultPomodoroSets, 8);
+      expect(fallbackPrefs.timerVisualStyle, TimerVisualStyle.digital);
+      expect(fallbackPrefs.lastSyncedAt, isNull);
+
+      // Persists and reloads valid preferences
+      await prefsDs.savePreferences(
+        const UserPreferences(
+          defaultSessionType: SessionType.oneHour,
+          defaultPomodoroSets: 5,
+          focusModeEnabled: true,
+          timerVisualStyle: TimerVisualStyle.circularRing,
+        ),
+      );
+      final UserPreferences savedPrefs = await prefsDs.getPreferences();
+      expect(savedPrefs.defaultSessionType, SessionType.oneHour);
+      expect(savedPrefs.defaultPomodoroSets, 5);
+      expect(savedPrefs.focusModeEnabled, isTrue);
+      expect(savedPrefs.timerVisualStyle, TimerVisualStyle.circularRing);
+
+      // Delta sync check: first sync passes since: null and records lastSyncedAt
+      DateTime syncClock = DateTime.utc(2026, 10, 31, 12, 0);
+      final _ControllableRemote remote = _ControllableRemote()..online = true;
+      final OfflineFirstStudySessionRepository repo =
+          OfflineFirstStudySessionRepository(
+            localDataSource: InMemoryLocalStudyDataSource(),
+            remoteDataSource: remote,
+            preferencesDataSource: prefsDs,
+            clock: () => syncClock,
+          );
+
+      final SyncResult firstSync = await repo.syncSessions();
+      expect(firstSync.isSuccess, isTrue);
+      expect(remote.lastPullSessionsSince, isNull);
+      expect(remote.lastPullSubjectsSince, isNull);
+      expect(await prefsDs.getLastSyncedAt(), syncClock);
+
+      // Second sync passes since: firstSync timestamp and advances lastSyncedAt
+      final DateTime secondSyncClock = DateTime.utc(2026, 10, 31, 13, 30);
+      syncClock = secondSyncClock;
+      final SyncResult secondSync = await repo.syncSessions();
+      expect(secondSync.isSuccess, isTrue);
+      expect(remote.lastPullSessionsSince, DateTime.utc(2026, 10, 31, 12, 0));
+      expect(remote.lastPullSubjectsSince, DateTime.utc(2026, 10, 31, 12, 0));
+      expect(await prefsDs.getLastSyncedAt(), secondSyncClock);
+
+      // Failed sync does NOT overwrite lastSyncedAt
+      syncClock = DateTime.utc(2026, 10, 31, 15, 0);
+      remote.failPullSessions = true;
+      final SyncResult failedSync = await repo.syncSessions();
+      expect(failedSync.isSuccess, isFalse);
+      expect(await prefsDs.getLastSyncedAt(), secondSyncClock);
+    });
   });
 
   group('4. Motivation, ActiveTimerNotifier & StudyDiaryNotifier', () {
@@ -508,6 +583,49 @@ void main() {
       // Mark review topic as resolved
       expect(await diaryN.markReviewTopicResolved('Definite Integral Area'), isTrue);
       expect(diaryN.summary.topicsToReview, isEmpty);
+    });
+
+    test('ActiveTimerNotifier & UserPreferencesNotifier restore and persist device-local preferences', () async {
+      final InMemoryUserPreferencesDataSource prefsDs =
+          InMemoryUserPreferencesDataSource(
+            initialPreferences: const UserPreferences(
+              defaultSessionType: SessionType.oneHour,
+              defaultPomodoroSets: 6,
+            ),
+          );
+
+      final ActiveTimerNotifier timerN = ActiveTimerNotifier(
+        preferencesDataSource: prefsDs,
+      );
+      final UserPreferencesNotifier userPrefsN = UserPreferencesNotifier(
+        dataSource: prefsDs,
+      );
+      addTearDown(() {
+        timerN.dispose();
+        userPrefsN.dispose();
+      });
+
+      // Allow async initial load to complete
+      await userPrefsN.loadPreferences();
+      await Future<void>.delayed(Duration.zero);
+      expect(timerN.selectedSessionType, SessionType.oneHour);
+      expect(timerN.targetPomodoroSets, 6);
+      expect(timerN.formattedTimerDisplay, '01:00:00');
+      expect(userPrefsN.defaultSessionType, SessionType.oneHour);
+
+      // Update timer selections and UI preferences -> persisted to dataSource
+      timerN.setSelectedSessionType(SessionType.freeStudy);
+      timerN.setTargetPomodoroSets(3);
+      await Future<void>.delayed(Duration.zero);
+      await userPrefsN.loadPreferences();
+      await userPrefsN.setFocusModeEnabled(true);
+      await userPrefsN.setTimerVisualStyle(TimerVisualStyle.circularRing);
+
+      final UserPreferences persisted = await prefsDs.getPreferences();
+      expect(persisted.defaultSessionType, SessionType.freeStudy);
+      expect(persisted.defaultPomodoroSets, 3);
+      expect(persisted.focusModeEnabled, isTrue);
+      expect(persisted.timerVisualStyle, TimerVisualStyle.circularRing);
     });
   });
 
